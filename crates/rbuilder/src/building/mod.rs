@@ -10,14 +10,18 @@ pub mod payout_tx;
 pub mod sim;
 pub mod testing;
 pub mod tracers;
-use alloy_consensus::{Header, EMPTY_OMMER_ROOT_HASH};
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_consensus::{Header, TxReceipt, EMPTY_OMMER_ROOT_HASH};
+use alloy_primitives::{Address, Bloom, Bytes, U256};
+use alloy_trie::proof::ProofRetainer;
 use builders::mock_block_building_helper::MockRootHasher;
 use reth_primitives::BlockBody;
-use reth_primitives_traits::{proofs, Block as _};
+use reth_primitives_traits::Block as _;
+
+use crate::live_builder::payload_events::InternalPayloadId;
+use reth_trie::{HashBuilder, HashedPostState, KeccakKeyHasher, Nibbles, TrieInput};
 
 use crate::{
-    live_builder::payload_events::InternalPayloadId,
+    mev_boost::adjustment::AdjustmentData,
     primitives::{Order, OrderId, SimValue, SimulatedOrder, TransactionSignedEcRecoveredWithBlobs},
     provider::RootHasher,
     roothash::RootHashError,
@@ -26,6 +30,7 @@ use crate::{
 use ahash::HashSet;
 use alloy_eips::{
     eip1559::{calculate_block_gas_limit, ETHEREUM_BLOCK_GAS_LIMIT_30M},
+    eip2718::Encodable2718,
     eip4844::BlobTransactionSidecar,
     eip4895::Withdrawals,
     eip6110::DEPOSIT_REQUEST_TYPE,
@@ -439,6 +444,7 @@ pub struct FinalizeResult {
     pub txs_blob_sidecars: Vec<Arc<BlobTransactionSidecar>>,
     /// The Pectra execution requests for this bid.
     pub execution_requests: Vec<Bytes>,
+    pub adjustment_data: AdjustmentData,
 
     pub root_hash_time: Duration,
 }
@@ -572,6 +578,8 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         ctx: &BlockBuildingContext,
         state: &mut BlockState,
     ) -> Result<(), InsertPayoutTxErr> {
+        let bribe = U256::from(1000000000000000_i64);
+        let value = value.saturating_add(bribe);
         let builder_signer = ctx
             .builder_signer
             .as_ref()
@@ -621,6 +629,7 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
                 EthEvmConfig::new(ctx.chain_spec.clone()),
                 ctx.chain_spec.clone(),
             );
+
             let deposit_requests =
                 parse_deposits_from_receipts(&ctx.chain_spec, self.receipts.iter())
                     .map_err(|err| FinalizeError::Other(err.into()))?;
@@ -674,20 +683,30 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         let block_number = ctx.evm_env.block_env.number.to::<u64>();
 
         let requests_hash = requests.as_ref().map(|requests| requests.requests_hash());
+
+        let receipts_with_bloom = self
+            .receipts
+            .into_iter()
+            .map(|r| r.into_with_bloom())
+            .collect::<Vec<_>>();
+
+        let (receipts_root, placeholder_receipt_proof) = get_root_with_proof(&receipts_with_bloom);
+        let logs_bloom = Bloom::from_iter(receipts_with_bloom.iter().flat_map(|x| &x.receipt.logs));
+
+        let receipts = receipts_with_bloom
+            .into_iter()
+            .map(|receipt| {
+                let (receipt, _) = receipt.into_components();
+                receipt
+            })
+            .collect::<Vec<_>>();
+
         let execution_outcome = ExecutionOutcome::new(
             bundle,
-            vec![self.receipts],
+            vec![receipts],
             block_number,
             vec![requests.clone().unwrap_or_default()],
         );
-
-        // @TODO: Check ethereum_receipts_root since it could fail on Op. Check reth crates/optimism/payload/src/builder.rs?
-        let receipts_root = execution_outcome
-            .ethereum_receipts_root(block_number)
-            .expect("Number is in range");
-        let logs_bloom = execution_outcome
-            .block_logs_bloom(block_number)
-            .expect("Number is in range");
 
         // calculate the state root
         let start = Instant::now();
@@ -695,7 +714,8 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         let root_hash_time = start.elapsed();
 
         // create the block header
-        let transactions_root = proofs::calculate_transaction_root(&self.executed_tx);
+        let (transactions_root, placeholder_transaction_proof) =
+            get_root_with_proof(&self.executed_tx);
 
         // double check blocked txs
         for tx_with_blob in &self.executed_tx {
@@ -769,12 +789,53 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
             },
         };
 
+        let bundle = execution_outcome.state();
+        let post_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle.state());
+        let trie_input = TrieInput::from_state(post_state);
+
+        let builder_address = ctx.evm_env.block_env.coinbase;
+        let builder_proof = state
+            .state_provider()
+            .proof(trie_input.clone(), builder_address, &[])
+            .expect("failed to get builder proof")
+            .proof;
+
+        let fee_recipient_address = ctx.attributes.suggested_fee_recipient;
+        let fee_recipient_proof = state
+            .state_provider()
+            .proof(trie_input.clone(), fee_recipient_address, &[])
+            .expect("failed to get fee recipient proof")
+            .proof;
+
+        let fee_payer_address =
+            Address::from_str(&std::env::var("ADJUSTMENT_FEE_PAYER_ADDRESS").unwrap()).unwrap();
+        let fee_payer_proof = state
+            .state_provider()
+            .proof(trie_input, fee_payer_address, &[])
+            .expect("failed to get fee payer proof")
+            .proof;
+
+        let adjustment_data = AdjustmentData {
+            state_root,
+            transactions_root,
+            receipts_root,
+            builder_address,
+            builder_proof,
+            fee_recipient_address,
+            fee_recipient_proof,
+            fee_payer_address,
+            fee_payer_proof,
+            placeholder_transaction_proof,
+            placeholder_receipt_proof,
+        };
+
         Ok(FinalizeResult {
             sealed_block: block.seal_slow(),
             cached_reads,
             txs_blob_sidecars,
             root_hash_time,
             execution_requests: requests.map(|er| er.take()).unwrap_or_default(),
+            adjustment_data,
         })
     }
 
@@ -801,6 +862,50 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         db.as_mut().merge_transitions(BundleRetention::Reverts);
         Ok(())
     }
+}
+
+fn adjust_index_for_rlp(i: usize, len: usize) -> usize {
+    if i > 0x7f {
+        i
+    } else if i == 0x7f || i + 1 == len {
+        0
+    } else {
+        i + 1
+    }
+}
+
+fn get_root_with_proof<T>(items: &[T]) -> (B256, Vec<Bytes>)
+where
+    T: Encodable2718,
+{
+    let mut value_buffer = Vec::new();
+
+    let items_len = items.len();
+    let placeholder_index = items_len - 1;
+    let proof_target = Nibbles::unpack(alloy_rlp::encode_fixed_size(&placeholder_index));
+
+    let mut hb = HashBuilder::default()
+        .with_proof_retainer(ProofRetainer::from_iter([proof_target.clone()]));
+
+    for i in 0..items_len {
+        let index = adjust_index_for_rlp(i, items_len);
+        let key = alloy_rlp::encode_fixed_size(&index);
+
+        value_buffer.clear();
+        items[index].encode_2718(&mut value_buffer);
+
+        hb.add_leaf(Nibbles::unpack(&key), &value_buffer);
+    }
+
+    let root = hb.root();
+    let proof = hb
+        .take_proof_nodes()
+        .into_nodes_sorted()
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect();
+
+    (root, proof)
 }
 
 impl PartialBlock<()> {

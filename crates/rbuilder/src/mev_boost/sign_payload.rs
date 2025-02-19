@@ -1,3 +1,4 @@
+use super::adjustment::AdjustmentData;
 use super::submission::{
     CapellaSubmitBlockRequest, DenebSubmitBlockRequest, ElectraSubmitBlockRequest,
     SubmitBlockRequest,
@@ -120,6 +121,7 @@ fn a2e_address(a: &Address) -> ExecutionAddress {
 pub fn sign_block_for_relay(
     signer: &BLSBlockSigner,
     sealed_block: &SealedBlock,
+    adjustment_data: &AdjustmentData,
     blobs_bundle: &[Arc<BlobTransactionSidecar>],
     execution_requests: &[Bytes], // The Pectra execution requests for this bid.
     chain_spec: &ChainSpec,
@@ -200,28 +202,37 @@ pub fn sign_block_for_relay(
         let execution_requests =
             ExecutionRequestsV4::try_from(Requests::new(execution_requests.to_vec()))?;
         if chain_spec.is_prague_active_at_timestamp(sealed_block.timestamp) {
-            SubmitBlockRequest::Electra(ElectraSubmitBlockRequest(SignedBidSubmissionV4 {
-                message,
-                execution_payload,
-                blobs_bundle,
-                signature,
-                execution_requests,
-            }))
+            SubmitBlockRequest::Electra(ElectraSubmitBlockRequest {
+                submission: SignedBidSubmissionV4 {
+                    message,
+                    execution_payload,
+                    blobs_bundle,
+                    signature,
+                    execution_requests,
+                },
+                adjustment_data: adjustment_data.clone(),
+            })
         } else {
-            SubmitBlockRequest::Deneb(DenebSubmitBlockRequest(SignedBidSubmissionV3 {
-                message,
-                execution_payload,
-                blobs_bundle,
-                signature,
-            }))
+            SubmitBlockRequest::Deneb(DenebSubmitBlockRequest {
+                submission: SignedBidSubmissionV3 {
+                    message,
+                    execution_payload,
+                    blobs_bundle,
+                    signature,
+                },
+                adjustment_data: adjustment_data.clone(),
+            })
         }
     } else {
         let execution_payload = capella_payload;
-        SubmitBlockRequest::Capella(CapellaSubmitBlockRequest(SignedBidSubmissionV2 {
-            message,
-            execution_payload,
-            signature,
-        }))
+        SubmitBlockRequest::Capella(CapellaSubmitBlockRequest {
+            submission: SignedBidSubmissionV2 {
+                message,
+                execution_payload,
+                signature,
+            },
+            adjustment_data: adjustment_data.clone(),
+        })
     };
 
     Ok(submit_block_request)

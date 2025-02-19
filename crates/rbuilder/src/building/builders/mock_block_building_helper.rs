@@ -101,6 +101,7 @@ impl BlockBuildingHelper for MockBlockBuildingHelper {
         let block = Block {
             trace: self.built_block_trace,
             sealed_block: SealedBlock::default(),
+            adjustment_data: Default::default(),
             txs_blobs_sidecars: Vec::new(),
             builder_name: "BlockBuildingHelper".to_string(),
             execution_requests: Default::default(),
