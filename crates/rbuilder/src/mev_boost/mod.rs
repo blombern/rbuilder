@@ -457,13 +457,13 @@ impl RelayClient {
         ssz: bool,
         gzip: bool,
         fake_relay: bool,
-        cancellations: bool,
+        _cancellations: bool,
     ) -> Result<Response, SubmitBlockErr> {
         let url = {
             let mut url = self.url.clone();
             url.set_path("/relay/v1/builder/blocks");
             url.query_pairs_mut()
-                .append_pair("cancellations", if cancellations { "1" } else { "0" })
+                .append_pair("cancellations", "0")
                 .append_pair("adjustments", "1");
             url
         };
