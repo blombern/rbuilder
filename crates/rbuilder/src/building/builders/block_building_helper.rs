@@ -460,6 +460,7 @@ impl BlockBuildingHelper for BlockBuildingHelperFromProvider {
         let block = Block {
             trace: self.built_block_trace,
             sealed_block: finalized_block.sealed_block,
+            adjustment_data: finalized_block.adjustment_data,
             txs_blobs_sidecars: finalized_block.txs_blob_sidecars,
             builder_name: self.builder_name.clone(),
             execution_requests: finalized_block.execution_requests,

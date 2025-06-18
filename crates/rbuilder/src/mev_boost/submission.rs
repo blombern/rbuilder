@@ -10,20 +10,34 @@ use ssz::{Decode, DecodeError, Encode};
 
 use crate::primitives::OrderId;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ElectraSubmitBlockRequest(pub SignedBidSubmissionV4);
+use super::adjustment::AdjustmentData;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DenebSubmitBlockRequest(pub SignedBidSubmissionV3);
+pub struct ElectraSubmitBlockRequest {
+    #[serde(flatten)]
+    pub submission: SignedBidSubmissionV4,
+    pub adjustment_data: AdjustmentData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DenebSubmitBlockRequest {
+    #[serde(flatten)]
+    pub submission: SignedBidSubmissionV3,
+    pub adjustment_data: AdjustmentData,
+}
 
 impl DenebSubmitBlockRequest {
     pub fn as_ssz_bytes(&self) -> Vec<u8> {
-        self.0.as_ssz_bytes()
+        self.submission.as_ssz_bytes()
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CapellaSubmitBlockRequest(pub SignedBidSubmissionV2);
+pub struct CapellaSubmitBlockRequest {
+    #[serde(flatten)]
+    pub submission: SignedBidSubmissionV2,
+    pub adjustment_data: AdjustmentData,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -36,26 +50,31 @@ pub enum SubmitBlockRequest {
 impl SubmitBlockRequest {
     pub fn bid_trace(&self) -> &BidTrace {
         match self {
-            SubmitBlockRequest::Capella(req) => &req.0.message,
-            SubmitBlockRequest::Deneb(req) => &req.0.message,
-            SubmitBlockRequest::Electra(req) => &req.0.message,
+            SubmitBlockRequest::Capella(req) => &req.submission.message,
+            SubmitBlockRequest::Deneb(req) => &req.submission.message,
+            SubmitBlockRequest::Electra(req) => &req.submission.message,
         }
     }
 
     pub fn from_ssz_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
         if let Ok(result) = SignedBidSubmissionV4::from_ssz_bytes(bytes) {
-            return Ok(SubmitBlockRequest::Electra(ElectraSubmitBlockRequest(
-                result,
-            )));
+            return Ok(SubmitBlockRequest::Electra(ElectraSubmitBlockRequest {
+                submission: result,
+                adjustment_data: Default::default(),
+            }));
         }
         if let Ok(result) = SignedBidSubmissionV3::from_ssz_bytes(bytes) {
-            return Ok(SubmitBlockRequest::Deneb(DenebSubmitBlockRequest(result)));
+            return Ok(SubmitBlockRequest::Deneb(DenebSubmitBlockRequest {
+                submission: result,
+                adjustment_data: Default::default(),
+            }));
         }
 
         let result = SignedBidSubmissionV2::from_ssz_bytes(bytes)?;
-        Ok(SubmitBlockRequest::Capella(CapellaSubmitBlockRequest(
-            result,
-        )))
+        Ok(SubmitBlockRequest::Capella(CapellaSubmitBlockRequest {
+            submission: result,
+            adjustment_data: Default::default(),
+        }))
     }
 }
 
@@ -99,10 +118,10 @@ impl serde::Serialize for SubmitBlockRequestNoBlobs<'_> {
                 }
 
                 SignedBidSubmissionV3Ref {
-                    message: &v3.0.message,
-                    execution_payload: &v3.0.execution_payload,
+                    message: &v3.submission.message,
+                    execution_payload: &v3.submission.execution_payload,
                     blobs_bundle: &BlobsBundleV1::new([]), // override blobs bundle with empty one
-                    signature: &v3.0.signature,
+                    signature: &v3.submission.signature,
                 }
                 .serialize(serializer)
             }
@@ -118,11 +137,11 @@ impl serde::Serialize for SubmitBlockRequestNoBlobs<'_> {
                 }
 
                 SignedBidSubmissionV4Ref {
-                    message: &v4.0.message,
-                    execution_payload: &v4.0.execution_payload,
+                    message: &v4.submission.message,
+                    execution_payload: &v4.submission.execution_payload,
                     blobs_bundle: &BlobsBundleV1::new([]), // override blobs bundle with empty one
-                    signature: &v4.0.signature,
-                    execution_requests: &v4.0.execution_requests,
+                    signature: &v4.submission.signature,
+                    execution_requests: &v4.submission.execution_requests,
                 }
                 .serialize(serializer)
             }

@@ -3,19 +3,17 @@ use crate::{
         block_list_provider::BlockList, order_input::mempool_txs_detector::MempoolTxsDetector,
         payload_events::InternalPayloadId,
     },
+    mev_boost::adjustment::AdjustmentData,
     primitives::{Order, OrderId, SimValue, SimulatedOrder, TransactionSignedEcRecoveredWithBlobs},
     provider::RootHasher,
     roothash::RootHashError,
     utils::{
         a2r_withdrawal, default_cfg_env, elapsed_ms,
-        receipts::{
-            calculate_receipt_root_and_block_logs_bloom, calculate_transactions_root, BloomCache,
-            TransactionRootCache,
-        },
+        receipts::{BloomCache, TransactionRootCache},
         timestamp_as_u64, Signer,
     },
 };
-use alloy_consensus::{Header, EMPTY_OMMER_ROOT_HASH};
+use alloy_consensus::{Header, TxReceipt, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{
     eip1559::{calculate_block_gas_limit, ETHEREUM_BLOCK_GAS_LIMIT_30M},
     eip4844::BlobTransactionSidecar,
@@ -23,10 +21,12 @@ use alloy_eips::{
     eip7685::Requests,
     eip7840::BlobParams,
     merge::BEACON_NONCE,
+    Encodable2718,
 };
 use alloy_evm::{block::system_calls::SystemCaller, env::EvmEnv, eth::eip6110};
-use alloy_primitives::{Address, Bytes, B256, I256, U256};
+use alloy_primitives::{Address, Bloom, Bytes, B256, I256, U256};
 use alloy_rpc_types_beacon::events::PayloadAttributesEvent;
+use alloy_trie::proof::ProofRetainer;
 use cached_reads::{LocalCachedReads, SharedCachedReads};
 use eth_sparse_mpt::SparseTrieLocalCache;
 use evm::EthCachedEvmFactory;
@@ -44,6 +44,7 @@ use reth_node_api::{EngineApiMessageVersion, PayloadBuilderAttributes};
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives::BlockBody;
 use reth_primitives_traits::{proofs, Block as _};
+use reth_trie::{HashBuilder, HashedPostState, KeccakKeyHasher, Nibbles, TrieInput};
 use revm::{
     context::BlockEnv,
     context_interface::{block::BlobExcessGasAndPrice, result::InvalidTransaction},
@@ -501,6 +502,7 @@ impl ExecutionError {
 
 pub struct FinalizeResult {
     pub sealed_block: SealedBlock,
+    pub adjustment_data: AdjustmentData,
     // sidecars for all txs in SealedBlock
     pub txs_blob_sidecars: Vec<Arc<BlobTransactionSidecar>>,
     /// The Pectra execution requests for this bid.
@@ -759,35 +761,44 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         let exec_outcome_time_ms = elapsed_ms(step_start);
         let step_start = Instant::now();
 
-        let (receipts_root, logs_bloom) = calculate_receipt_root_and_block_logs_bloom(
-            &mut local_ctx.bloom_cache,
-            &self.executed_tx_infos,
-            ctx.faster_finalize,
-        );
+        let receipts_with_bloom = self
+            .executed_tx_infos
+            .iter()
+            .map(|info| info.receipt.clone().into_with_bloom())
+            .collect::<Vec<_>>();
+
+        let (receipts_root, placeholder_receipt_proof) = get_root_with_proof(&receipts_with_bloom);
+        let logs_bloom = Bloom::from_iter(receipts_with_bloom.iter().flat_map(|x| &x.receipt.logs));
+
+        let receipts = receipts_with_bloom
+            .into_iter()
+            .map(|receipt| {
+                let (receipt, _) = receipt.into_components();
+                receipt
+            })
+            .collect::<Vec<_>>();
 
         let bloom_time_ms = elapsed_ms(step_start);
         let step_start = Instant::now();
 
+        let (bundle, provider) = state.into_parts();
+        // we use execution outcome here only for interface compatibility, its just a wrapper around bundle
+        let execution_outcome =
+            ExecutionOutcome::new(bundle, vec![receipts], block_number, Vec::new());
+
         // calculate the state root
-        let state_root = {
-            let (bundle, _) = state.into_parts();
-            // we use execution outcome here only for interface compatibility, its just a wrapper around bundle
-            let execution_outcome =
-                ExecutionOutcome::new(bundle, Vec::new(), block_number, Vec::new());
-            ctx.root_hasher.state_root(&execution_outcome, local_ctx)?
-        };
+        let state_root = ctx.root_hasher.state_root(&execution_outcome, local_ctx)?;
         let root_hash_time = step_start.elapsed();
 
         let root_hash_time_ms = elapsed_ms(step_start);
         let step_start = Instant::now();
 
-        // create the block header
-        // let transactions_root = proofs::calculate_transaction_root(&self.executed_tx);
-        let transactions_root = calculate_transactions_root(
-            &mut local_ctx.tx_root_cache,
-            &self.executed_tx_infos,
-            ctx.faster_finalize,
-        );
+        let txs = self
+            .executed_tx_infos
+            .iter()
+            .map(|info| info.tx.clone())
+            .collect::<Vec<_>>();
+        let (transactions_root, placeholder_transaction_proof) = get_root_with_proof(&txs[..]);
 
         let transactions_root_time_ms = elapsed_ms(step_start);
         let step_start = Instant::now();
@@ -866,8 +877,48 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
                 withdrawals,
             },
         };
+
+        // produce adjustment data
+        let bundle = execution_outcome.state();
+        let post_state = HashedPostState::from_bundle_state::<KeccakKeyHasher>(bundle.state());
+        let trie_input = TrieInput::from_state(post_state);
+
+        let builder_address = ctx.evm_env.block_env.beneficiary;
+        let builder_proof = provider
+            .proof(trie_input.clone(), builder_address, &[])
+            .expect("failed to get builder proof")
+            .proof;
+
+        let fee_recipient_address = ctx.attributes.suggested_fee_recipient;
+        let fee_recipient_proof = provider
+            .proof(trie_input.clone(), fee_recipient_address, &[])
+            .expect("failed to get fee recipient proof")
+            .proof;
+
+        let fee_payer_address =
+            Address::from_str(&std::env::var("ADJUSTMENT_FEE_PAYER_ADDRESS").unwrap()).unwrap();
+        let fee_payer_proof = provider
+            .proof(trie_input, fee_payer_address, &[])
+            .expect("failed to get fee payer proof")
+            .proof;
+
+        let adjustment_data = AdjustmentData {
+            state_root,
+            transactions_root,
+            receipts_root,
+            builder_address,
+            builder_proof,
+            fee_recipient_address,
+            fee_recipient_proof,
+            fee_payer_address,
+            fee_payer_proof,
+            placeholder_transaction_proof,
+            placeholder_receipt_proof,
+        };
+
         let result = FinalizeResult {
             sealed_block: block.seal_slow(),
+            adjustment_data,
             txs_blob_sidecars,
             root_hash_time,
             execution_requests: requests.map(|er| er.take()).unwrap_or_default(),
@@ -970,6 +1021,51 @@ pub fn create_sim_value(
         order_ok.paid_kickbacks.clone(),
     )
 }
+
+fn adjust_index_for_rlp(i: usize, len: usize) -> usize {
+    if i > 0x7f {
+        i
+    } else if i == 0x7f || i + 1 == len {
+        0
+    } else {
+        i + 1
+    }
+}
+
+fn get_root_with_proof<T>(items: &[T]) -> (B256, Vec<Bytes>)
+where
+    T: Encodable2718,
+{
+    let mut value_buffer = Vec::new();
+
+    let items_len = items.len();
+    let placeholder_index = items_len - 1;
+    let proof_target = Nibbles::unpack(alloy_rlp::encode_fixed_size(&placeholder_index));
+
+    let mut hb = HashBuilder::default()
+        .with_proof_retainer(ProofRetainer::from_iter([proof_target.clone()]));
+
+    for i in 0..items_len {
+        let index = adjust_index_for_rlp(i, items_len);
+        let key = alloy_rlp::encode_fixed_size(&index);
+
+        value_buffer.clear();
+        items[index].encode_2718(&mut value_buffer);
+
+        hb.add_leaf(Nibbles::unpack(&key), &value_buffer);
+    }
+
+    let root = hb.root();
+    let proof = hb
+        .take_proof_nodes()
+        .into_nodes_sorted()
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect();
+
+    (root, proof)
+}
+
 #[cfg(test)]
 mod test {
     use alloy_primitives::I256;

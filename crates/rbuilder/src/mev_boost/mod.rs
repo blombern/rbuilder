@@ -1,3 +1,4 @@
+pub mod adjustment;
 mod error;
 pub mod fake_mev_boost_relay;
 pub mod rpc;
@@ -476,7 +477,8 @@ impl RelayClient {
             let mut url = self.url.clone();
             url.set_path("/relay/v1/builder/blocks");
             url.query_pairs_mut()
-                .append_pair("cancellations", if cancellations { "1" } else { "0" });
+                .append_pair("cancellations", if cancellations { "1" } else { "0" })
+                .append_pair("adjustments", "1");
             url
         };
 
@@ -486,9 +488,9 @@ impl RelayClient {
         let (mut body_data, content_type) = if ssz {
             (
                 match &submission_with_metadata.submission {
-                    SubmitBlockRequest::Capella(data) => data.0.as_ssz_bytes(),
-                    SubmitBlockRequest::Deneb(data) => data.0.as_ssz_bytes(),
-                    SubmitBlockRequest::Electra(data) => data.0.as_ssz_bytes(),
+                    SubmitBlockRequest::Capella(data) => data.submission.as_ssz_bytes(),
+                    SubmitBlockRequest::Deneb(data) => data.submission.as_ssz_bytes(),
+                    SubmitBlockRequest::Electra(data) => data.submission.as_ssz_bytes(),
                 },
                 SSZ_CONTENT_TYPE,
             )

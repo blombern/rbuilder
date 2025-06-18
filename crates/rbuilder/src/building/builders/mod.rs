@@ -10,6 +10,7 @@ use crate::{
         payload_events::{InternalPayloadId, MevBoostSlotData},
         simulation::SimulatedOrderCommand,
     },
+    mev_boost::adjustment::AdjustmentData,
     primitives::{AccountNonce, OrderId, SimulatedOrder},
     provider::StateProviderFactory,
     utils::{is_provider_factory_health_error, NonceCache},
@@ -34,6 +35,7 @@ use super::{simulated_order_command_to_sink, OrderPriority, PrioritizedOrderStor
 pub struct Block {
     pub trace: BuiltBlockTrace,
     pub sealed_block: SealedBlock,
+    pub adjustment_data: AdjustmentData,
     /// Sidecars for the txs included in SealedBlock
     pub txs_blobs_sidecars: Vec<Arc<BlobTransactionSidecar>>,
     /// The Pectra execution requests for this bid.

@@ -257,6 +257,7 @@ async fn run_submit_to_relays_job(
             let normal_signed_submission = match sign_block_for_relay(
                 &config.signer,
                 &block.sealed_block,
+                &block.adjustment_data,
                 &block.txs_blobs_sidecars,
                 &block.execution_requests,
                 &config.chain_spec,
@@ -278,6 +279,7 @@ async fn run_submit_to_relays_job(
                 match sign_block_for_relay(
                     &optimistic_config.signer,
                     &block.sealed_block,
+                    &block.adjustment_data,
                     &block.txs_blobs_sidecars,
                     &block.execution_requests,
                     &config.chain_spec,
