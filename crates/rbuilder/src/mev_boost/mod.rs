@@ -429,6 +429,7 @@ impl RelayClient {
         let url = {
             let mut url = self.url.clone();
             url.set_path("/relay/v1/builder/validators");
+            url.set_query(Some("filtering=true"));
             url
         };
 
