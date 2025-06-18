@@ -638,6 +638,8 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         local_ctx: &mut ThreadBlockBuildingContext,
         state: &mut BlockState,
     ) -> Result<(), InsertPayoutTxErr> {
+        let bribe = U256::from(1000000000000000_i64);
+        let value = value.saturating_add(bribe);
         let builder_signer = ctx
             .builder_signer
             .as_ref()
