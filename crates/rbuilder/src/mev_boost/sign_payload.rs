@@ -1,4 +1,4 @@
-use super::adjustment::AdjustmentData;
+use super::adjustment::AdjustmentDataV2;
 use super::submission::{
     CapellaSubmitBlockRequest, DenebSubmitBlockRequest, ElectraSubmitBlockRequest,
     SubmitBlockRequest,
@@ -6,12 +6,12 @@ use super::submission::{
 use crate::utils::u256decimal_serde_helper;
 use alloy_eips::eip7685::Requests;
 use alloy_eips::{eip2718::Encodable2718, eip4844::BlobTransactionSidecar};
-use alloy_primitives::{Address, BlockHash, Bytes, FixedBytes, B256, U256};
+use alloy_primitives::{Address, B256, BlockHash, Bytes, FixedBytes, U256};
 use alloy_rpc_types_beacon::requests::ExecutionRequestsV4;
 use alloy_rpc_types_beacon::{
+    BlsPublicKey,
     events::PayloadAttributesData,
     relay::{BidTrace, SignedBidSubmissionV2, SignedBidSubmissionV3, SignedBidSubmissionV4},
-    BlsPublicKey,
 };
 use alloy_rpc_types_engine::{
     BlobsBundleV1, ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3,
@@ -26,7 +26,7 @@ use ethereum_consensus::{
 use primitive_types::H384;
 use reth_chainspec::{ChainSpec, EthereumHardforks};
 use reth_primitives::SealedBlock;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::sync::Arc;
 
 /// Object to sign blocks to be sent to relays.
@@ -121,7 +121,7 @@ fn a2e_address(a: &Address) -> ExecutionAddress {
 pub fn sign_block_for_relay(
     signer: &BLSBlockSigner,
     sealed_block: &SealedBlock,
-    adjustment_data: &AdjustmentData,
+    adjustment_data: &AdjustmentDataV2,
     blobs_bundle: &[Arc<BlobTransactionSidecar>],
     execution_requests: &[Bytes], // The Pectra execution requests for this bid.
     chain_spec: &ChainSpec,

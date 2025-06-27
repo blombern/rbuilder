@@ -7,19 +7,20 @@ pub mod submission;
 
 use super::utils::u256decimal_serde_helper;
 
+use adjustment::{HeaderSubmissionV3, SignedAdjustableHeaderSubmissionV4};
 use alloy_primitives::{Address, BlockHash, Bytes, U256};
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use itertools::Itertools;
 use primitive_types::H384;
 use reqwest::{
-    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE},
     Body, Response, StatusCode,
+    header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue},
 };
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use ssz::Encode;
 use std::{io::Write, str::FromStr};
-use submission::{SubmitBlockRequest, SubmitBlockRequestNoBlobs, SubmitBlockRequestWithMetadata};
+use submission::SubmitBlockRequestWithMetadata;
 use url::Url;
 
 pub use error::*;
@@ -29,7 +30,6 @@ const TOTAL_PAYMENT_HEADER: &str = "Total-Payment";
 const BUNDLE_HASHES_HEADER: &str = "Bundle-Hashes";
 const TOP_BID_HEADER: &str = "Top-Bid";
 
-const JSON_CONTENT_TYPE: &str = "application/json";
 const SSZ_CONTENT_TYPE: &str = "application/octet-stream";
 const GZIP_CONTENT_ENCODING: &str = "gzip";
 
@@ -469,47 +469,33 @@ impl RelayClient {
     async fn call_relay_submit_block(
         &self,
         submission_with_metadata: &SubmitBlockRequestWithMetadata,
-        ssz: bool,
+        _ssz: bool,
         gzip: bool,
         fake_relay: bool,
         cancellations: bool,
     ) -> Result<Response, SubmitBlockErr> {
         let url = {
             let mut url = self.url.clone();
-            url.set_path("/relay/v1/builder/blocks");
+            url.set_path("/relay/v3/builder/headers");
             url.query_pairs_mut()
                 .append_pair("cancellations", if cancellations { "1" } else { "0" })
                 .append_pair("adjustments", "1");
             url
         };
 
+        let header: SignedAdjustableHeaderSubmissionV4 =
+            (&submission_with_metadata.submission).into();
+        let tx_count = submission_with_metadata.submission.tx_count();
+        let data = HeaderSubmissionV3 {
+            url: std::env::var("GET_PAYLOAD_URL").unwrap().as_bytes().into(),
+            tx_count,
+            submission: header,
+        };
         let mut builder = self.client.post(url.clone());
         let mut headers = HeaderMap::new();
         // SSZ vs JSON
-        let (mut body_data, content_type) = if ssz {
-            (
-                match &submission_with_metadata.submission {
-                    SubmitBlockRequest::Capella(data) => data.submission.as_ssz_bytes(),
-                    SubmitBlockRequest::Deneb(data) => data.submission.as_ssz_bytes(),
-                    SubmitBlockRequest::Electra(data) => data.submission.as_ssz_bytes(),
-                },
-                SSZ_CONTENT_TYPE,
-            )
-        } else {
-            let json_result = if fake_relay {
-                // For the fake relay we remove the blobs
-                serde_json::to_vec(&SubmitBlockRequestNoBlobs(
-                    &submission_with_metadata.submission,
-                ))
-            } else {
-                serde_json::to_vec(&submission_with_metadata.submission)
-            };
-
-            (
-                json_result.map_err(|e| SubmitBlockErr::RPCSerializationError(e.to_string()))?,
-                JSON_CONTENT_TYPE,
-            )
-        };
+        let mut body_data = data.as_ssz_bytes();
+        let content_type = SSZ_CONTENT_TYPE;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
         self.add_auth_headers(&mut headers)
             .map_err(|_| SubmitBlockErr::InvalidHeader)?;

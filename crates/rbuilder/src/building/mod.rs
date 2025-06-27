@@ -3,7 +3,7 @@ use crate::{
         block_list_provider::BlockList, order_input::mempool_txs_detector::MempoolTxsDetector,
         payload_events::InternalPayloadId,
     },
-    mev_boost::adjustment::AdjustmentData,
+    mev_boost::adjustment::AdjustmentDataV2,
     primitives::{Order, OrderId, SimValue, SimulatedOrder, TransactionSignedEcRecoveredWithBlobs},
     provider::RootHasher,
     roothash::RootHashError,
@@ -65,6 +65,7 @@ use tracing::{error, trace};
 use tx_sim_cache::TxExecutionCache;
 
 pub mod block_orders;
+mod beacon_tx_root;
 pub mod builders;
 pub mod built_block_trace;
 pub mod cached_reads;
@@ -502,7 +503,7 @@ impl ExecutionError {
 
 pub struct FinalizeResult {
     pub sealed_block: SealedBlock,
-    pub adjustment_data: AdjustmentData,
+    pub adjustment_data: AdjustmentDataV2,
     // sidecars for all txs in SealedBlock
     pub txs_blob_sidecars: Vec<Arc<BlobTransactionSidecar>>,
     /// The Pectra execution requests for this bid.
@@ -713,7 +714,7 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         };
 
         // Apply withdrawals
-        let withdrawals_root = if ctx
+        let el_withdrawals_root = if ctx
             .chain_spec
             .is_shanghai_active_at_timestamp(ctx.attributes.timestamp)
         {
@@ -738,7 +739,7 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
 
         db.db().merge_transitions(BundleRetention::Reverts);
 
-        Ok((requests, withdrawals_root))
+        Ok((requests, el_withdrawals_root))
     }
 
     /// Mostly based on reth's (v1.2) default_ethereum_payload_builder.
@@ -752,7 +753,7 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
         let start = Instant::now();
 
         let step_start = Instant::now();
-        let (requests, withdrawals_root) = self.process_requests(&mut state, ctx, local_ctx)?;
+        let (requests, el_withdrawals_root) = self.process_requests(&mut state, ctx, local_ctx)?;
         let block_number = ctx.evm_env.block_env.number;
 
         let request_processsing_time_ms = elapsed_ms(step_start);
@@ -769,7 +770,10 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
             .map(|info| info.receipt.clone().into_with_bloom())
             .collect::<Vec<_>>();
 
-        let (receipts_root, placeholder_receipt_proof) = get_root_with_proof(&receipts_with_bloom);
+        let (el_receipts_root, el_placeholder_receipt_proof) = get_root_with_proof(&receipts_with_bloom);
+        let receipt_count = receipts_with_bloom.len();
+        // TODO: avoid redundant computation
+        let pre_payment_logs_bloom = Bloom::from_iter(receipts_with_bloom.iter().take(receipt_count - 1).flat_map(|x| &x.receipt.logs));
         let logs_bloom = Bloom::from_iter(receipts_with_bloom.iter().flat_map(|x| &x.receipt.logs));
 
         let receipts = receipts_with_bloom
@@ -789,7 +793,7 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
             ExecutionOutcome::new(bundle, vec![receipts], block_number, Vec::new());
 
         // calculate the state root
-        let state_root = ctx.root_hasher.state_root(&execution_outcome, local_ctx)?;
+        let el_state_root = ctx.root_hasher.state_root(&execution_outcome, local_ctx)?;
         let root_hash_time = step_start.elapsed();
 
         let root_hash_time_ms = elapsed_ms(step_start);
@@ -800,7 +804,9 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
             .iter()
             .map(|info| info.tx.clone())
             .collect::<Vec<_>>();
-        let (transactions_root, placeholder_transaction_proof) = get_root_with_proof(&txs[..]);
+        let (el_transactions_root, el_placeholder_transaction_proof) = get_root_with_proof(&txs[..]);
+        let tx_bytes = beacon_tx_root::to_transaction_bytes(&txs[..]);
+        let cl_placeholder_transaction_proof = beacon_tx_root::generate_transactions_merkle_proof(&tx_bytes[..]);
 
         let transactions_root_time_ms = elapsed_ms(step_start);
         let step_start = Instant::now();
@@ -841,10 +847,10 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
             parent_hash: ctx.attributes.parent,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             beneficiary: ctx.evm_env.block_env.beneficiary,
-            state_root,
-            transactions_root,
-            receipts_root,
-            withdrawals_root,
+            state_root: el_state_root,
+            transactions_root: el_transactions_root,
+            receipts_root: el_receipts_root,
+            withdrawals_root: el_withdrawals_root,
             logs_bloom,
             timestamp: ctx.attributes.timestamp,
             mix_hash: ctx.attributes.prev_randao,
@@ -904,18 +910,19 @@ impl<Tracer: SimulationTracer> PartialBlock<Tracer> {
             .expect("failed to get fee payer proof")
             .proof;
 
-        let adjustment_data = AdjustmentData {
-            state_root,
-            transactions_root,
-            receipts_root,
+        let adjustment_data = AdjustmentDataV2 {
+            el_transactions_root,
+            el_withdrawals_root: el_withdrawals_root.unwrap(),
             builder_address,
             builder_proof,
             fee_recipient_address,
             fee_recipient_proof,
             fee_payer_address,
             fee_payer_proof,
-            placeholder_transaction_proof,
-            placeholder_receipt_proof,
+            el_placeholder_transaction_proof,
+            cl_placeholder_transaction_proof,
+            el_placeholder_receipt_proof,
+            pre_payment_logs_bloom,
         };
 
         let result = FinalizeResult {

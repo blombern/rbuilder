@@ -6,5 +6,7 @@
 
 mod metrics;
 pub mod servers;
+mod payload_storage;
 
 pub use metrics::*;
+pub use payload_storage::*;

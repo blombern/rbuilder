@@ -1,8 +1,8 @@
 use alloy_primitives::U256;
 use alloy_rpc_types_beacon::{
+    BlsSignature,
     relay::{BidTrace, SignedBidSubmissionV2, SignedBidSubmissionV3, SignedBidSubmissionV4},
     requests::ExecutionRequestsV4,
-    BlsSignature,
 };
 use alloy_rpc_types_engine::{BlobsBundleV1, ExecutionPayloadV3};
 use serde::{Deserialize, Serialize};
@@ -10,20 +10,20 @@ use ssz::{Decode, DecodeError, Encode};
 
 use crate::primitives::OrderId;
 
-use super::adjustment::AdjustmentData;
+use super::adjustment::AdjustmentDataV2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ElectraSubmitBlockRequest {
     #[serde(flatten)]
     pub submission: SignedBidSubmissionV4,
-    pub adjustment_data: AdjustmentData,
+    pub adjustment_data: AdjustmentDataV2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DenebSubmitBlockRequest {
     #[serde(flatten)]
     pub submission: SignedBidSubmissionV3,
-    pub adjustment_data: AdjustmentData,
+    pub adjustment_data: AdjustmentDataV2,
 }
 
 impl DenebSubmitBlockRequest {
@@ -36,7 +36,7 @@ impl DenebSubmitBlockRequest {
 pub struct CapellaSubmitBlockRequest {
     #[serde(flatten)]
     pub submission: SignedBidSubmissionV2,
-    pub adjustment_data: AdjustmentData,
+    pub adjustment_data: AdjustmentDataV2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +53,31 @@ impl SubmitBlockRequest {
             SubmitBlockRequest::Capella(req) => &req.submission.message,
             SubmitBlockRequest::Deneb(req) => &req.submission.message,
             SubmitBlockRequest::Electra(req) => &req.submission.message,
+        }
+    }
+
+    pub fn tx_count(&self) -> u32 {
+        match self {
+            SubmitBlockRequest::Capella(req) => req
+                .submission
+                .execution_payload
+                .payload_inner
+                .transactions
+                .len() as u32,
+            SubmitBlockRequest::Deneb(req) => req
+                .submission
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .transactions
+                .len() as u32,
+            SubmitBlockRequest::Electra(req) => req
+                .submission
+                .execution_payload
+                .payload_inner
+                .payload_inner
+                .transactions
+                .len() as u32,
         }
     }
 

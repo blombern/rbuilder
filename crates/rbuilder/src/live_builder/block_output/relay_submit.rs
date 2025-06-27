@@ -14,7 +14,7 @@ use crate::{
         add_relay_submit_time, add_subsidy_value, inc_conn_relay_errors,
         inc_failed_block_simulations, inc_initiated_submissions, inc_other_relay_errors,
         inc_relay_accepted_submissions, inc_subsidized_blocks, inc_too_many_req_relay_errors,
-        mark_submission_start_time,
+        mark_submission_start_time, store_payload,
     },
     utils::{duration_ms, error_storage::store_error_event},
 };
@@ -449,6 +449,10 @@ async fn submit_bid_to_the_relay(
         trace!("Relay submission is skipped due to rate limit");
         return;
     }
+
+    // Store the payload in memory for retrieval
+    let block_hash = signed_submit_request.submission.bid_trace().block_hash;
+    store_payload(block_hash, signed_submit_request.clone());
 
     let relay_result = tokio::select! {
         _ = cancel.cancelled() => {

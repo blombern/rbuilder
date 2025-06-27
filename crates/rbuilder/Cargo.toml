@@ -119,6 +119,11 @@ sysperf.workspace = true
 crossbeam = "0.8.4"
 parking_lot.workspace = true
 dashmap = "6.1.0"
+tree_hash = "0.8.0"
+tree_hash_derive = "0.8.0"
+ssz_types = "0.8.0"
+typenum = "1.17.0"
+bls = { git = "https://github.com/sigp/lighthouse", package = "bls", tag = "v6.0.0" }
 
 # IPC state provider deps
 reipc = { git = "https://github.com/nethermindeth/reipc.git", rev = "3837f3539201f948dd1c2c96a85a60d589feb4c6" }

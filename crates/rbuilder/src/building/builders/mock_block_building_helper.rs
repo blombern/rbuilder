@@ -1,6 +1,6 @@
 use crate::building::ThreadBlockBuildingContext;
 use crate::live_builder::simulation::SimulatedOrderCommand;
-use crate::mev_boost::adjustment::AdjustmentData;
+use crate::mev_boost::adjustment::AdjustmentDataV2;
 use crate::primitives::SimValue;
 use crate::provider::RootHasher;
 use crate::roothash::RootHashError;
@@ -106,7 +106,7 @@ impl BlockBuildingHelper for MockBlockBuildingHelper {
         let block = Block {
             trace: self.built_block_trace,
             sealed_block: SealedBlock::default(),
-            adjustment_data: AdjustmentData::default(),
+            adjustment_data: AdjustmentDataV2::default(),
             txs_blobs_sidecars: Vec::new(),
             builder_name: "BlockBuildingHelper".to_string(),
             execution_requests: Default::default(),
